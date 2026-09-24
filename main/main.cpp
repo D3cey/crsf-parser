@@ -3,11 +3,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "esp_log.h"
+
+static const char *TAG = "CRSF_PARSER";
 
 static constexpr size_t BUFFER_SIZE = 64;
 static constexpr uint8_t MIN_PAYLOAD_LEN = 2;
 static constexpr uint8_t MAX_PAYLOAD_LEN = BUFFER_SIZE - 2;
 static constexpr uint8_t CRSF_SYNC_BYTE = 0xC8;
+
+static constexpr configSTACK_DEPTH_TYPE PARSER_TASK_STACK_SIZE = 2048; // why 2048?
+static constexpr UBaseType_t PARSER_TASK_PRIORITY = 5; // what should the priority be?
 
 namespace
 {
@@ -30,7 +36,7 @@ namespace
         0x84, 0x51, 0xFB, 0x2E, 0x7A, 0xAF, 0x05, 0xD0, 0xAD, 0x78, 0xD2, 0x07, 0x53, 0x86, 0x2C, 0xF9};
 }
 
-QueueHandle_t frameQueue; // where should it be created?
+QueueHandle_t frameQueue = NULL; // where should it be created?
 
 class CRSFFrame
 {
@@ -120,9 +126,9 @@ private:
     size_t m_buffer_index = 0;
     uint8_t m_buffer[BUFFER_SIZE];
     uint8_t m_expected_length = 0;
-    CRSFFrame m_out_frame;
 
-    bool parse_byte(uint8_t byte)
+public:
+    bool parse_byte(uint8_t byte, CRSFFrame &frame)
     {
         switch (m_state)
         {
@@ -168,13 +174,7 @@ private:
                 if (crc_check())
                 {
                     m_state = ParserState::PS_SYNC;
-                    m_out_frame.populate_frame(m_buffer[2], &m_buffer[3]);
-                    
-                    // push frame to queue
-                    if (xQueueSendToBack(frameQueue, (void *)&m_out_frame, (TickType_t)10) != pdPASS) {
-                        // what happens when a frame couldn't be send to the queue?
-                    }
-
+                    frame.populate_frame(m_buffer[2], &m_buffer[3]);
                     return true;
                 }
 
@@ -231,8 +231,40 @@ private:
     }
 };
 
+void parser_task(void *pvParameters)
+{
+    CRSFParser parser;
+    CRSFFrame frame;
+
+    while (1) {
+        uint8_t incoming_byte = read_uart_byte();
+    
+        if (parser.parse_byte(incoming_byte, frame)) {
+            if (xQueueSendToBack(frameQueue, &frame, 0) != pdPASS) {
+                ESP_LOGE(TAG, "Frame couldn't be sent to frameQueue.");
+                return;
+            }   
+        }
+    }
+}
 
 extern "C" void app_main(void)
 {
     frameQueue = xQueueCreate(10, sizeof(CRSFFrame));
+
+    if (frameQueue == NULL)
+    {
+        ESP_LOGE(TAG, "frameQueue creation failed.");
+        return;
+    }
+
+    BaseType_t xReturned;
+    TaskHandle_t xHandle = NULL;
+
+    xReturned = xTaskCreate(parser_task, "parser_task", PARSER_TASK_STACK_SIZE, NULL, PARSER_TASK_PRIORITY, &xHandle);
+
+    if (xReturned != pdPASS) {
+        ESP_LOGE(TAG, "\"parser_task\" task creation failed.");
+        return;
+    }
 }
