@@ -1,8 +1,11 @@
-#include <stdio.h>
 #include <cstring>
+#include <stdio.h>
+
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
+
+#include "driver/uart.h"
 #include "esp_log.h"
 
 static const char *TAG = "CRSF_PARSER";
@@ -13,7 +16,7 @@ static constexpr uint8_t MAX_PAYLOAD_LEN = BUFFER_SIZE - 2;
 static constexpr uint8_t CRSF_SYNC_BYTE = 0xC8;
 
 static constexpr configSTACK_DEPTH_TYPE PARSER_TASK_STACK_SIZE = 2048; // why 2048?
-static constexpr UBaseType_t PARSER_TASK_PRIORITY = 5; // what should the priority be?
+static constexpr UBaseType_t PARSER_TASK_PRIORITY = 5;                 // what should the priority be?
 
 namespace
 {
@@ -236,20 +239,64 @@ void parser_task(void *pvParameters)
     CRSFParser parser;
     CRSFFrame frame;
 
-    while (1) {
-        uint8_t incoming_byte = read_uart_byte();
-    
-        if (parser.parse_byte(incoming_byte, frame)) {
-            if (xQueueSendToBack(frameQueue, &frame, 0) != pdPASS) {
-                ESP_LOGE(TAG, "Frame couldn't be sent to frameQueue.");
-                return;
-            }   
+    while (1)
+    {
+        uint8_t bytes_buffer[128]; // should I name it UART_READ_BYTES_BUFFER? is there a better name for this variable?
+
+        int bytes_read = uart_read_bytes(UART_NUM_2, bytes_buffer, sizeof(bytes_buffer), pdMS_TO_TICKS(10));
+
+        if (bytes_read > 0)
+        {
+
+            for (size_t i = 0; i < bytes_read; i++)
+            {
+                if (parser.parse_byte(bytes_buffer[i], frame))
+                {
+                    if (xQueueSendToBack(frameQueue, &frame, 0) != pdPASS)
+                    {
+                        ESP_LOGE(TAG, "Frame couldn't be sent to frameQueue.");
+                        return;
+                    }
+                }
+            }
         }
     }
 }
 
+static constexpr int UART_RX_PIN = 16;
+
+class UARTController {
+private:
+    uart_port_t m_port;
+public:
+    UARTController(uart_port_t port, int rx_pin, int tx_pin = UART_PIN_NO_CHANGE, int baud_rate = 400000)
+        : m_port(port) 
+    {
+        uart_config_t uart_config = {};
+        uart_config.baud_rate  = baud_rate;
+        uart_config.data_bits  = UART_DATA_8_BITS;
+        uart_config.parity     = UART_PARITY_DISABLE;
+        uart_config.stop_bits  = UART_STOP_BITS_1;
+        uart_config.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+        uart_config.source_clk = UART_SCLK_APB;
+
+        ESP_ERROR_CHECK(uart_param_config(m_port, &uart_config));
+        ESP_ERROR_CHECK(uart_set_pin(m_port, tx_pin, rx_pin, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
+        ESP_ERROR_CHECK(uart_driver_install(m_port, 2048, 0, 0, NULL, 0));
+    }
+
+    int read(uint8_t *buffer, size_t max_len, TickType_t timeout_ticks) {
+        return uart_read_bytes(m_port, buffer, max_len, timeout_ticks);
+    }
+
+    uart_port_t get_port() const { return m_port; }
+
+};
+
+
 extern "C" void app_main(void)
 {
+    
     frameQueue = xQueueCreate(10, sizeof(CRSFFrame));
 
     if (frameQueue == NULL)
@@ -258,12 +305,15 @@ extern "C" void app_main(void)
         return;
     }
 
+    static UARTController uart(UART_NUM_2, UART_RX_PIN);    
+
     BaseType_t xReturned;
     TaskHandle_t xHandle = NULL;
 
     xReturned = xTaskCreate(parser_task, "parser_task", PARSER_TASK_STACK_SIZE, NULL, PARSER_TASK_PRIORITY, &xHandle);
 
-    if (xReturned != pdPASS) {
+    if (xReturned != pdPASS)
+    {
         ESP_LOGE(TAG, "\"parser_task\" task creation failed.");
         return;
     }
