@@ -118,105 +118,91 @@ public:
 class CRSFParser
 {
 private:
-    enum class ParserState
-    {
-        PS_SYNC,
-        PS_LENGTH,
-        PS_PAYLOAD_AND_CRC
-    };
-
-    ParserState m_state = ParserState::PS_SYNC;
+    bool (CRSFParser::*m_state_func)(uint8_t byte, CRSFFrame &frame) = &CRSFParser::state_sync;
     size_t m_buffer_index = 0;
     uint8_t m_buffer[BUFFER_SIZE];
     uint8_t m_expected_length = 0;
 
 public:
-    bool parse_byte(uint8_t byte, CRSFFrame &frame)
+    bool state_sync(uint8_t byte, CRSFFrame &frame)
     {
-        switch (m_state)
+        if (byte == CRSF_SYNC_BYTE)
         {
-        case ParserState::PS_SYNC:
-            if (byte == CRSF_SYNC_BYTE)
+            m_state_func = &CRSFParser::state_length;
+            m_buffer[0] = byte;
+            m_buffer_index = 1;
+            m_expected_length = 0;
+        }
+
+        return false;
+    }
+
+    bool state_length(uint8_t byte, CRSFFrame &frame)
+    {
+        if (byte >= MIN_PAYLOAD_LEN && byte <= MAX_PAYLOAD_LEN)
+        {
+            m_state_func = &CRSFParser::state_payload_and_crc;
+            m_expected_length = byte;
+            m_buffer[1] = byte;
+            m_buffer_index = 2;
+        }
+
+        return false;
+    }
+
+    bool state_payload_and_crc(uint8_t byte, CRSFFrame &frame)
+    {
+        m_buffer[m_buffer_index++] = byte;
+
+        if (m_buffer_index == m_expected_length + 2)
+        {
+            if (crc_check())
             {
-                m_state = ParserState::PS_LENGTH;
-                m_buffer[0] = byte;
-                m_buffer_index = 1;
-                m_expected_length = 0;
+                m_state_func = &CRSFParser::state_sync;
+                frame.populate_frame(m_buffer[2], &m_buffer[3]);
+                return true;
             }
-            break;
 
-        case ParserState::PS_LENGTH:
-            if (byte >= MIN_PAYLOAD_LEN && byte <= MAX_PAYLOAD_LEN)
+            m_state_func = &CRSFParser::state_sync;
+
+            for (size_t i = 1; i < m_buffer_index; i++)
             {
-                m_state = ParserState::PS_PAYLOAD_AND_CRC;
-                m_expected_length = byte;
-                m_buffer[1] = byte;
-                m_buffer_index = 2;
-                break;
-            }
-
-            if (byte == CRSF_SYNC_BYTE)
-            {
-                m_buffer[0] = byte;
-                m_buffer_index = 1;
-                m_expected_length = 0;
-                m_state = ParserState::PS_LENGTH;
-                break;
-            }
-
-            m_buffer_index = 0;
-            m_state = ParserState::PS_SYNC;
-
-            break;
-
-        case ParserState::PS_PAYLOAD_AND_CRC:
-            m_buffer[m_buffer_index++] = byte;
-
-            if (m_buffer_index == m_expected_length + 2)
-            {
-                if (crc_check())
+                if (m_buffer[i] == CRSF_SYNC_BYTE)
                 {
-                    m_state = ParserState::PS_SYNC;
-                    frame.populate_frame(m_buffer[2], &m_buffer[3]);
-                    return true;
-                }
+                    size_t remaining = m_buffer_index - i;
 
-                m_state = ParserState::PS_SYNC;
-
-                for (size_t i = 1; i < m_buffer_index; i++)
-                {
-                    if (m_buffer[i] == CRSF_SYNC_BYTE)
+                    if (remaining == 1)
                     {
-                        size_t remaining = m_buffer_index - i;
+                        m_buffer[0] = m_buffer[i];
+                        m_buffer_index = 1;
+                        m_state_func = &CRSFParser::state_length;
+                        return false;
+                    }
 
-                        if (remaining == 1)
-                        {
-                            m_buffer[0] = m_buffer[i];
-                            m_buffer_index = 1;
-                            m_state = ParserState::PS_LENGTH;
-                            break;
-                        }
-
-                        uint8_t potential_length = m_buffer[i + 1];
-                        if (potential_length >= MIN_PAYLOAD_LEN && potential_length <= MAX_PAYLOAD_LEN)
-                        {
-                            memmove(m_buffer, &m_buffer[i], remaining);
-                            m_buffer_index = remaining;
-                            m_expected_length = potential_length;
-                            m_state = ParserState::PS_PAYLOAD_AND_CRC;
-                            break;
-                        }
+                    uint8_t potential_length = m_buffer[i + 1];
+                    if (potential_length >= MIN_PAYLOAD_LEN && potential_length <= MAX_PAYLOAD_LEN)
+                    {
+                        memmove(m_buffer, &m_buffer[i], remaining);
+                        m_buffer_index = remaining;
+                        m_expected_length = potential_length;
+                        m_state_func = &CRSFParser::state_payload_and_crc;
+                        return false;
                     }
                 }
-
-                if (m_state == ParserState::PS_SYNC)
-                {
-                    m_buffer_index = 0;
-                }
             }
-            break;
+
+            if (m_state_func == &CRSFParser::state_sync)
+            {
+                m_buffer_index = 0;
+            }
         }
+
         return false;
+    }
+
+    bool parse_byte(uint8_t byte, CRSFFrame &frame)
+    {
+        return (this->*m_state_func)(byte, frame);
     }
 
     bool crc_check()
