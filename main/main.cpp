@@ -15,8 +15,8 @@ static constexpr uint8_t MIN_PAYLOAD_LEN = 2;
 static constexpr uint8_t MAX_PAYLOAD_LEN = BUFFER_SIZE - 2;
 static constexpr uint8_t CRSF_SYNC_BYTE = 0xC8;
 
-static constexpr configSTACK_DEPTH_TYPE PARSER_TASK_STACK_SIZE = 2048; // why 2048?
-static constexpr UBaseType_t PARSER_TASK_PRIORITY = 5;                 // what should the priority be?
+static constexpr configSTACK_DEPTH_TYPE PARSER_TASK_STACK_SIZE = 2048;
+static constexpr UBaseType_t PARSER_TASK_PRIORITY = 5;
 
 namespace
 {
@@ -39,17 +39,17 @@ namespace
         0x84, 0x51, 0xFB, 0x2E, 0x7A, 0xAF, 0x05, 0xD0, 0xAD, 0x78, 0xD2, 0x07, 0x53, 0x86, 0x2C, 0xF9};
 }
 
-QueueHandle_t frameQueue = NULL; // where should it be created?
+QueueHandle_t xFrameQueue = NULL; // where should it be created?
 
 class CRSFFrame
 {
     enum class FrameType : uint8_t
     {
-        Battery_Sensor = 0x08,
-        Link_Statistics = 0x14
+        BATTERY_SENSOR = 0x08,
+        LINK_STATISTICS = 0x14
     };
 
-    struct Battery_Sensor_frame
+    struct BatterySensorFrame
     {
         int16_t voltage;        // Voltage (LSB = 10 µV)
         int16_t current;        // Current (LSB = 10 µA)
@@ -57,7 +57,7 @@ class CRSFFrame
         uint8_t remaining;      // Battery remaining (percent)
     };
 
-    struct Link_Statistics_frame
+    struct LinkStatisticsFrame
     {
         uint8_t up_rssi_ant1;      // Uplink RSSI Antenna 1 (dBm * -1)
         uint8_t up_rssi_ant2;      // Uplink RSSI Antenna 2 (dBm * -1)
@@ -76,37 +76,37 @@ class CRSFFrame
 
     union Payload
     {
-        Battery_Sensor_frame battery;
-        Link_Statistics_frame link_stats;
-    } payload;
+        BatterySensorFrame battery;
+        LinkStatisticsFrame link_stats;
+    } m_payload;
 
 public:
     bool populate_frame(uint8_t frame_type, uint8_t frame_payload[])
     {
         m_type = static_cast<FrameType>(frame_type);
 
-        switch (frame_type)
+        switch (m_type)
         {
-        case int(FrameType::Battery_Sensor):
-            payload.battery.voltage = static_cast<int16_t>((frame_payload[0] << 8) | frame_payload[1]);
-            payload.battery.current = static_cast<int16_t>((frame_payload[2] << 8) | frame_payload[3]);
-            payload.battery.capacity_used = static_cast<uint32_t>((static_cast<uint32_t>(frame_payload[4]) << 16) |
-                                                                  (static_cast<uint32_t>(frame_payload[5]) << 8) |
-                                                                  static_cast<uint32_t>(frame_payload[6]));
-            payload.battery.remaining = frame_payload[7];
+        case FrameType::BATTERY_SENSOR:
+            m_payload.battery.voltage = static_cast<int16_t>((frame_payload[0] << 8) | frame_payload[1]);
+            m_payload.battery.current = static_cast<int16_t>((frame_payload[2] << 8) | frame_payload[3]);
+            m_payload.battery.capacity_used = static_cast<uint32_t>((static_cast<uint32_t>(frame_payload[4]) << 16) |
+                                                                    (static_cast<uint32_t>(frame_payload[5]) << 8) |
+                                                                    static_cast<uint32_t>(frame_payload[6]));
+            m_payload.battery.remaining = frame_payload[7];
             return true;
 
-        case int(FrameType::Link_Statistics):
-            payload.link_stats.up_rssi_ant1 = frame_payload[0];
-            payload.link_stats.up_rssi_ant2 = frame_payload[1];
-            payload.link_stats.up_link_quality = frame_payload[2];
-            payload.link_stats.up_snr = static_cast<int8_t>(frame_payload[3]);
-            payload.link_stats.active_antenna = frame_payload[4];
-            payload.link_stats.rf_profile = frame_payload[5];
-            payload.link_stats.up_rf_power = frame_payload[6];
-            payload.link_stats.down_rssi = frame_payload[7];
-            payload.link_stats.down_link_quality = frame_payload[8];
-            payload.link_stats.down_snr = static_cast<int8_t>(frame_payload[9]);
+        case FrameType::LINK_STATISTICS:
+            m_payload.link_stats.up_rssi_ant1 = frame_payload[0];
+            m_payload.link_stats.up_rssi_ant2 = frame_payload[1];
+            m_payload.link_stats.up_link_quality = frame_payload[2];
+            m_payload.link_stats.up_snr = static_cast<int8_t>(frame_payload[3]);
+            m_payload.link_stats.active_antenna = frame_payload[4];
+            m_payload.link_stats.rf_profile = frame_payload[5];
+            m_payload.link_stats.up_rf_power = frame_payload[6];
+            m_payload.link_stats.down_rssi = frame_payload[7];
+            m_payload.link_stats.down_link_quality = frame_payload[8];
+            m_payload.link_stats.down_snr = static_cast<int8_t>(frame_payload[9]);
             return true;
 
         default:
@@ -223,7 +223,7 @@ public:
     {
         uint8_t crc = 0;
         size_t CRC_START_BYTE = 2;
-        size_t CRC_END_BYTE = m_expected_length + 2 - 1; // +2 because of sync and length bytes, -1 because of crc byte, how can I write it cleaner?
+        size_t CRC_END_BYTE = m_expected_length + 1; // +2 because of sync and length bytes, -1 because of crc byte
 
         for (size_t i = CRC_START_BYTE; i < CRC_END_BYTE; i++)
         {
@@ -241,21 +241,21 @@ void parser_task(void *pvParameters)
 
     while (1)
     {
-        uint8_t bytes_buffer[128]; // should I name it UART_READ_BYTES_BUFFER? is there a better name for this variable?
+        uint8_t rx_buffer[128];
 
-        int bytes_read = uart_read_bytes(UART_NUM_2, bytes_buffer, sizeof(bytes_buffer), pdMS_TO_TICKS(10));
+        int bytes_read = uart_read_bytes(UART_NUM_2, rx_buffer, sizeof(rx_buffer), pdMS_TO_TICKS(10));
 
         if (bytes_read > 0)
         {
 
             for (size_t i = 0; i < bytes_read; i++)
             {
-                if (parser.parse_byte(bytes_buffer[i], frame))
+                if (parser.parse_byte(rx_buffer[i], frame))
                 {
-                    if (xQueueSendToBack(frameQueue, &frame, 0) != pdPASS)
+                    if (xQueueSendToBack(xFrameQueue, &frame, 0) != pdPASS)
                     {
                         ESP_LOGE(TAG, "Frame couldn't be sent to frameQueue.");
-                        return;
+                        continue;
                     }
                 }
             }
@@ -265,19 +265,21 @@ void parser_task(void *pvParameters)
 
 static constexpr int UART_RX_PIN = 16;
 
-class UARTController {
+class UARTController
+{
 private:
     uart_port_t m_port;
+
 public:
     UARTController(uart_port_t port, int rx_pin, int tx_pin = UART_PIN_NO_CHANGE, int baud_rate = 400000)
-        : m_port(port) 
+        : m_port(port)
     {
         uart_config_t uart_config = {};
-        uart_config.baud_rate  = baud_rate;
-        uart_config.data_bits  = UART_DATA_8_BITS;
-        uart_config.parity     = UART_PARITY_DISABLE;
-        uart_config.stop_bits  = UART_STOP_BITS_1;
-        uart_config.flow_ctrl  = UART_HW_FLOWCTRL_DISABLE;
+        uart_config.baud_rate = baud_rate;
+        uart_config.data_bits = UART_DATA_8_BITS;
+        uart_config.parity = UART_PARITY_DISABLE;
+        uart_config.stop_bits = UART_STOP_BITS_1;
+        uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
         uart_config.source_clk = UART_SCLK_APB;
 
         ESP_ERROR_CHECK(uart_param_config(m_port, &uart_config));
@@ -285,27 +287,26 @@ public:
         ESP_ERROR_CHECK(uart_driver_install(m_port, 2048, 0, 0, NULL, 0));
     }
 
-    int read(uint8_t *buffer, size_t max_len, TickType_t timeout_ticks) {
+    int read(uint8_t *buffer, size_t max_len, TickType_t timeout_ticks)
+    {
         return uart_read_bytes(m_port, buffer, max_len, timeout_ticks);
     }
 
     uart_port_t get_port() const { return m_port; }
-
 };
-
 
 extern "C" void app_main(void)
 {
-    
-    frameQueue = xQueueCreate(10, sizeof(CRSFFrame));
 
-    if (frameQueue == NULL)
+    xFrameQueue = xQueueCreate(10, sizeof(CRSFFrame));
+
+    if (xFrameQueue == NULL)
     {
         ESP_LOGE(TAG, "frameQueue creation failed.");
         return;
     }
 
-    static UARTController uart(UART_NUM_2, UART_RX_PIN);    
+    static UARTController uart(UART_NUM_2, UART_RX_PIN);
 
     BaseType_t xReturned;
     TaskHandle_t xHandle = NULL;
